@@ -1,0 +1,16 @@
+[package]
+name = "vismatch-svc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+num-traits = "0.2"
+
+image = "0.24"
+imagehash = "0.3"
+ndarray = "0.17"
+walkdir = "2.5.0"
+bincode = {version = "2", features = ["serde"]}
+serde = {version = "1", features = ["derive"]}
+#img_hash = "3"
