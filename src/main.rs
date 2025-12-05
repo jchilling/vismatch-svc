@@ -11,7 +11,8 @@ use vismatch_svc::image_hash::*;     // our packaged hash algorithms
 use vismatch_svc::{
     is_image_file,
 };
-type ProjectHashDict = HashMap<String, Vec<ImageHashEntry>>;
+use tokio::sync::RwLock;
+type ProjectHashDict = Arc<RwLock<HashMap<String, Vec<ImageHashEntry>>>>;
 
 
 /// Calculate project-wide hash from given path.
@@ -63,11 +64,11 @@ fn load_or_calc_project_hashes(project_path: &Path, hash_type: HashType)
 
 /// For a given image and specified project name, calculate
 /// the difference list across project images for provided image.
-fn calc_sim_in_project(image: &DynamicImage, project_name: &str, project_hashes: Arc<ProjectHashDict>) 
+async fn calc_sim_in_project(image: &DynamicImage, project_name: &str, project_hashes: ProjectHashDict) 
     -> Result<Vec<ImageDistEntry>, Box<dyn Error + Send + Sync>>{
-    
+    let project_dict_rlock = project_hashes.read().await;
     // first, we should check if the project exists.
-    match project_hashes.get(project_name) {
+    match (*project_dict_rlock).get(project_name) {
         Some(hash_list) => {
             let mut diff_result = calc_similarity_list(image, hash_list);
             diff_result.sort();
@@ -137,8 +138,8 @@ async fn main() {
                 .partition_result();
 
     // Create a Arc to wrap shared project hashes.
-    let project_name_hash_map: Arc<ProjectHashDict>
-            = Arc::new(children_project_hashes.into_iter().collect());
+    let project_name_hash_map: ProjectHashDict
+            = Arc::new(RwLock::new(children_project_hashes.into_iter().collect()));
 
     let load_all_done = load_all.elapsed(); // Measure load time
 
@@ -155,7 +156,7 @@ async fn main() {
     let compared_res = calc_sim_in_project(
         &test_img, 
         "val2017", 
-        project_name_hash_map).expect("cannot calculate image distance");
+        project_name_hash_map).await.expect("cannot calculate image distance");
 
 
     let top3 = &compared_res[0..3];
