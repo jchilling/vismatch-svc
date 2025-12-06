@@ -15,4 +15,5 @@ bincode = {version = "2", features = ["serde"]}
 serde = {version = "1", features = ["derive"]}
 itertools = "0.14"
 tokio = {version = "1.48", features = ["full"]}
+serde_json = "1.0.145"
 #img_hash = "3"
