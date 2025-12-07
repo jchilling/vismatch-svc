@@ -1,0 +1,19 @@
+services:
+  image-compare-srv:
+    build:
+      context: .
+    image: h-alice/vismatch-svc  # Image name for the built service
+    container_name: vismatch-svc
+    env_file:
+      - .env # Load environment variables from the .env file
+    restart: unless-stopped
+    volumes:
+      - ./image_root:/app/image_root
+    ports:
+      - 3000:3000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+      
