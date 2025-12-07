@@ -1,4 +1,5 @@
 
+use std::cmp::min;
 use std::error::Error;          // standard error trait
 use std::time::Instant;         // calculate time difference
 use std::collections::HashMap;  // hashmap support
@@ -57,21 +58,21 @@ async fn save_image_to_project(
     let project_root = Path::new(project_root);
     let project_path = &project_root.join(project_name);
 
+    let _project_hashes = Arc::clone(&project_hashes);
+    let mut project_dict_wlock = _project_hashes.write().await;
+
     // check project dir
     match project_path.is_dir() {
         false => {
             // create project folder
             create_dir(project_path)
                 .map_err(|e| format!("cannot create project folder: {}", e.to_string()))?;
+
+            // create entry for our new project.
+            (*project_dict_wlock).insert(project_name.to_owned(), Vec::<ImageHashEntry>::new());
         }
         true => {} // continue execution
     }
-
-    let _project_hashes = Arc::clone(&project_hashes);
-
-    let mut project_dict_wlock = _project_hashes.write().await;
-
-    (*project_dict_wlock).insert(project_name.to_owned(), Vec::<ImageHashEntry>::new());
 
     // now add image name
     let image_target_path = project_path.join(image_name);
@@ -182,7 +183,8 @@ async fn compare_handler(
         Ok(dist_vec) => {
 
             // [NOTE] we pick the top-3 entries from closest images, change if needed.
-            let sim_vec: Vec<SimilarImageEntry> = (&dist_vec[0..3])
+            let ending_index = min(dist_vec.len(), 3);
+            let sim_vec: Vec<SimilarImageEntry> = (&dist_vec[0..ending_index])
                 .iter().map(
                     |x| dist_entry_to_api_sim_entry(
                         x, 
