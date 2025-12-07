@@ -1,6 +1,13 @@
 
-use std::time::Instant;                // calculate time difference
-use std::error::Error;                 // standard error trait
+use std::error::Error;          // standard error trait
+use std::time::Instant;         // calculate time difference
+use std::collections::HashMap;  // hashmap support
+use image::DynamicImage;        // image IO
+use itertools::Itertools;       // functional pattern support to make life easier
+
+// asynchronous execution and management
+use tokio::sync::RwLock;    // shared object management
+use std::sync::Arc;         // shared object reference
 
 // HTTP related libs
 use axum::http::{Response, StatusCode}; // HTTP
@@ -10,24 +17,23 @@ use axum::body::Body;                   // plain response body
 use axum::extract::{Json, State};       // response types
 use axum::{Router, http};               // router
 use tokio::net::TcpListener;            // listener
+use std::net::SocketAddr;               // socker definition
 
-
-// functional pattern support for clean code
-
-
-use image::DynamicImage;             // image IO
-use itertools::Itertools;
-use std::collections::HashMap;       // hashmap support
-use std::sync::Arc;                  // shared object reference
+// filesystem and os-related libraries
 use std::path::{Path, PathBuf};      // filesystem path operations
 use std::fs::{read_dir, create_dir}; // filesystem utils
-use vismatch_svc::{HasSingleImage, base64_to_image, dist_entry_to_api_sim_entry, image_hash::*};     // our packaged hash algorithms
-use vismatch_svc::is_image_file;
-use vismatch_svc::api::AppError;
-use tokio::sync::RwLock;
 
-use std::net::SocketAddr;
-use vismatch_svc::api::*;
+// internal libraries
+use vismatch_svc::{
+    HasSingleImage,         // trait for getting image from request object
+    base64_to_image, 
+    dist_entry_to_api_sim_entry, image_hash::*};     // our packaged hash algorithms
+
+use vismatch_svc::project_mgmt::{
+    load_or_calc_project_hashes     
+};
+use vismatch_svc::api::*;           // API structure
+
 
 type ProjectHashDict = Arc<RwLock<HashMap<String, Vec<ImageHashEntry>>>>;
 
@@ -36,6 +42,9 @@ struct AppState {
     project_root: String,
     project_dict: ProjectHashDict,
 }
+
+// common task definition
+
 
 async fn save_image_to_project(
     project_root: &str,
@@ -80,6 +89,7 @@ async fn save_image_to_project(
     // we clone this, since it will be moved to other thread
     let _image_target_path = image_target_path.clone();
 
+    // we spawn a task to calculate hash.
     let hash_calc_task = 
         tokio::task::spawn_blocking(move || {    
             let image_target_path = _image_target_path;
@@ -104,52 +114,6 @@ async fn save_image_to_project(
     Ok(()) // All good, return
 }
 
-/// Calculate project-wide hash from given path.
-fn calc_hash_project(project_path: &Path, hash_type: HashType) -> Result<Vec<ImageHashEntry>, Box<dyn Error>> {
-    let project_dir_reader = 
-        read_dir(project_path)
-            .map_err(|e: std::io::Error| format!("error reading project folder: <{}>", e))?;
-
-    let (images_in_project, _): (Vec<_>, Vec<_>) = 
-        project_dir_reader.filter_ok(|f| is_image_file(f))
-                .map_ok(|f| f.path())
-                .partition_result();
-
-    let (h, _): (Vec<_>, Vec<_>) = images_in_project.into_iter()
-                                    .map(|f| fetch_cache_or_calc_hash(&f, hash_type))
-                                    .partition_result();
-    Ok(h)
-}
-
-/// For all images in project folder, try to load hash cache,
-/// and calculate if not found hash cache.
-fn load_or_calc_project_hashes(project_path: &Path, hash_type: HashType) 
-    -> Result<Vec<ImageHashEntry>, Box<dyn Error>> {
-
-    let load_now = Instant::now(); // Measure load time
-    
-    // Initial check
-    project_path.is_dir()
-        .then(|| ())
-        .ok_or_else( || 
-            format!("failed to access project path {:?}", project_path))?;
-
-    let project_name = 
-        project_path.file_name().ok_or("invalid project name")?;
-
-    // NOTE: Change standard hash type if needed.
-    let hash_list: Vec<ImageHashEntry> = 
-        calc_hash_project(project_path, hash_type)?;
-
-    let load_done = load_now.elapsed(); // Measure load time
-
-    // Verbose
-
-    println!("[*] loading project <{:?}> costs: {:.3?}", project_name, load_done);
-    println!("[v] loaded {} entries from project <{:?}>", hash_list.len(), project_name);
-    
-    Ok(hash_list)
-}
 
 /// For a given image and specified project name, calculate
 /// the difference list across project images for provided image.
@@ -265,11 +229,13 @@ async fn upload_handler(
     Ok(Json(UploadImageResp {
         success: true,
         message: "image uploaded and indexed successfully".to_owned(),
-        token: "123-abc".to_string(), // [WARN] [NOTE] change later to proper uuid
+        token: "dummy-deletion-token".to_string(), // [WARN] [NOTE] change later to proper uuid
     }))
 
 }
 
+
+/// Handler for "404 not found" error, returning plain text body.
 async fn not_found_handler() -> Response<Body> { 
     (
         StatusCode::NOT_FOUND,
@@ -277,7 +243,6 @@ async fn not_found_handler() -> Response<Body> {
         "Knock, knock. Anyone here?\n\nSorry, this door seems to be missing! Maybe try another link?".to_owned()
     ).into_response()
 }
-
 
 #[tokio::main]
 async fn main() {
@@ -355,6 +320,8 @@ async fn main() {
 
     println!("[*] image comparison service listening on {}", addr);
 
+
+    // Stage 3: starting service
     let axum_state: AppState = AppState { 
         project_root: project_root.to_string_lossy().to_string(),
         project_dict: project_name_hash_map };
@@ -366,8 +333,6 @@ async fn main() {
                     .fallback(not_found_handler);
 
     axum::serve(listener, axum_app).await.unwrap();
-    
-
 }
 
 
