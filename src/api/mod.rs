@@ -49,6 +49,17 @@ pub struct RemoveImageResp {
 	message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct DeleteProjectReq {
+	pub project_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct DeleteProjectResp {
+	pub success: bool,
+	pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

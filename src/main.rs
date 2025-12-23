@@ -13,16 +13,17 @@ use std::sync::Arc;         // shared object reference
 // HTTP related libs
 use axum::http::{Response, StatusCode}; // HTTP
 use axum::response::IntoResponse;       // convert to response
-use axum::routing::{post};              // HTTP method
+use axum::routing::{post, delete};     // HTTP methods
 use axum::body::Body;                   // plain response body
-use axum::extract::{Json, State};       // response types
+use axum::extract::{Json, State, Path as PathParam}; // response types
 use axum::{Router, http};               // router
 use tokio::net::TcpListener;            // listener
 use std::net::SocketAddr;               // socker definition
+use tower_http::cors::{CorsLayer, Any}; // CORS support
 
 // filesystem and os-related libraries
 use std::path::{Path, PathBuf};      // filesystem path operations
-use std::fs::{read_dir, create_dir}; // filesystem utils
+use std::fs::{read_dir, create_dir, remove_dir_all}; // filesystem utils
 
 // internal libraries
 use vismatch_svc::{
@@ -239,6 +240,44 @@ async fn upload_handler(
 
 }
 
+async fn delete_project_handler(
+    State(state): State<AppState>,
+    PathParam(project_name): PathParam<String>)
+    -> Result<Json<DeleteProjectResp>, AppError> {
+    
+    let project_root = Path::new(&state.project_root);
+    let project_path = project_root.join(&project_name);
+    let project_dict = Arc::clone(&state.project_dict);
+
+    // Check if project exists
+    if !project_path.exists() {
+        return Ok(Json(DeleteProjectResp {
+            success: false,
+            message: format!("Project '{}' does not exist", project_name),
+        }));
+    }
+
+    // Remove from in-memory hash dict first
+    {
+        let mut project_dict_wlock = project_dict.write().await;
+        project_dict_wlock.remove(&project_name);
+    }
+
+    // Delete the project directory
+    match remove_dir_all(&project_path) {
+        Ok(_) => {
+            println!("[*] deleted project <{}>", project_name);
+            Ok(Json(DeleteProjectResp {
+                success: true,
+                message: format!("Project '{}' deleted successfully", project_name),
+            }))
+        },
+        Err(e) => {
+            Err(AppError::InternalError(format!("Failed to delete project directory: {}", e)))
+        }
+    }
+}
+
 
 /// Handler for "404 not found" error, returning plain text body.
 async fn not_found_handler() -> Response<Body> { 
@@ -331,9 +370,17 @@ async fn main() {
         project_root: project_root.to_string_lossy().to_string(),
         project_dict: project_name_hash_map };
 
+    // Configure CORS to allow requests from frontend
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let axum_app: Router = Router::new()
                     .route("/diff", post(compare_handler))
                     .route("/upload", post(upload_handler))
+                    .route("/project/:project_name", delete(delete_project_handler))
+                    .layer(cors)
                     .with_state(axum_state)
                     .fallback(not_found_handler);
 

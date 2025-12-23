@@ -35,3 +35,12 @@ export interface ApiError {
   message: string;
 }
 
+export interface DeleteProjectReq {
+  project_name: string;
+}
+
+export interface DeleteProjectResp {
+  success: boolean;
+  message: string;
+}
+

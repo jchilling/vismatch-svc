@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import ImageUpload from './components/ImageUpload';
 import ImageCompare from './components/ImageCompare';
+import { api } from './services/api';
 import './App.css';
 
 type Tab = 'compare' | 'upload';
@@ -8,6 +9,39 @@ type Tab = 'compare' | 'upload';
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('compare');
   const [projectName, setProjectName] = useState('');
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteMessage, setDeleteMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const handleDeleteProject = async () => {
+    if (!projectName.trim()) {
+      setDeleteMessage({ type: 'error', text: '請輸入專案名稱' });
+      return;
+    }
+
+    if (!confirm(`確定要刪除專案 "${projectName}" 嗎？此操作無法復原！\n\nAre you sure you want to delete project "${projectName}"? This action cannot be undone!`)) {
+      return;
+    }
+
+    setDeleteLoading(true);
+    setDeleteMessage(null);
+
+    try {
+      const response = await api.deleteProject({ project_name: projectName });
+      if (response.success) {
+        setDeleteMessage({ type: 'success', text: response.message });
+        setProjectName(''); // Clear project name after successful deletion
+      } else {
+        setDeleteMessage({ type: 'error', text: response.message });
+      }
+    } catch (error) {
+      setDeleteMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : '刪除失敗，請稍後再試',
+      });
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
 
   return (
     <div className="app">
@@ -18,15 +52,33 @@ function App() {
 
       <main className="app-main">
         <div className="project-input-section">
-          <label htmlFor="project-name">專案名稱</label>
-          <input
-            id="project-name"
-            type="text"
-            value={projectName}
-            onChange={(e) => setProjectName(e.target.value)}
-            placeholder="請輸入專案名稱"
-            className="project-input"
-          />
+          <div className="project-input-row">
+            <div className="project-input-group">
+              <label htmlFor="project-name">專案名稱</label>
+              <input
+                id="project-name"
+                type="text"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="請輸入專案名稱"
+                className="project-input"
+              />
+            </div>
+            {projectName.trim() && (
+              <button
+                onClick={handleDeleteProject}
+                disabled={deleteLoading}
+                className="btn btn-danger"
+              >
+                {deleteLoading ? '刪除中...' : '刪除專案'}
+              </button>
+            )}
+          </div>
+          {deleteMessage && (
+            <div className={`message message-${deleteMessage.type}`}>
+              {deleteMessage.text}
+            </div>
+          )}
         </div>
 
         <div className="tabs">

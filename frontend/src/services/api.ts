@@ -4,6 +4,8 @@ import type {
   CompareImageResp,
   UploadImageReq,
   UploadImageResp,
+  DeleteProjectReq,
+  DeleteProjectResp,
   ApiError,
 } from '../types/api';
 
@@ -86,6 +88,27 @@ export const api = {
           throw new Error(axiosError.response.data.message);
         }
         throw new Error(axiosError.message || 'Failed to upload image');
+      }
+      throw error;
+    }
+  },
+
+  /**
+   * Delete a project and all its images
+   */
+  async deleteProject(req: DeleteProjectReq): Promise<DeleteProjectResp> {
+    try {
+      // URL encode the project name to handle special characters
+      const encodedProjectName = encodeURIComponent(req.project_name);
+      const response = await apiClient.delete<DeleteProjectResp>(`/project/${encodedProjectName}`);
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<ApiError>;
+        if (axiosError.response?.data) {
+          throw new Error(axiosError.response.data.message);
+        }
+        throw new Error(axiosError.message || 'Failed to delete project');
       }
       throw error;
     }
