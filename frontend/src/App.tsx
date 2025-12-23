@@ -34,9 +34,18 @@ function App() {
         setDeleteMessage({ type: 'error', text: response.message });
       }
     } catch (error) {
+      console.error('Delete project error:', error);
+      let errorMessage = '刪除失敗，請稍後再試';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+        // Check if it's a network error
+        if (error.message.includes('Network Error') || error.message.includes('Failed to fetch')) {
+          errorMessage = '無法連接到伺服器，請確認後端服務是否正在運行';
+        }
+      }
       setDeleteMessage({
         type: 'error',
-        text: error instanceof Error ? error.message : '刪除失敗，請稍後再試',
+        text: errorMessage,
       });
     } finally {
       setDeleteLoading(false);

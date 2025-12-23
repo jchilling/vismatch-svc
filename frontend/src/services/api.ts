@@ -100,11 +100,21 @@ export const api = {
     try {
       // URL encode the project name to handle special characters
       const encodedProjectName = encodeURIComponent(req.project_name);
-      const response = await apiClient.delete<DeleteProjectResp>(`/project/${encodedProjectName}`);
+      const url = `/project/${encodedProjectName}`;
+      console.log('[API] Deleting project:', url, req);
+      const response = await apiClient.delete<DeleteProjectResp>(url);
+      console.log('[API] Delete response:', response.data);
       return response.data;
     } catch (error) {
+      console.error('[API] Delete project error:', error);
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError<ApiError>;
+        console.error('[API] Axios error details:', {
+          status: axiosError.response?.status,
+          statusText: axiosError.response?.statusText,
+          data: axiosError.response?.data,
+          message: axiosError.message,
+        });
         if (axiosError.response?.data) {
           throw new Error(axiosError.response.data.message);
         }

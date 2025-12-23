@@ -1,4 +1,5 @@
 
+use regex::Regex;
 use std::cmp::min;
 use std::error::Error;          // standard error trait
 use std::time::Instant;         // calculate time difference
@@ -11,7 +12,7 @@ use tokio::sync::RwLock;    // shared object management
 use std::sync::Arc;         // shared object reference
 
 // HTTP related libs
-use axum::http::{Response, StatusCode}; // HTTP
+use axum::http::{Response, StatusCode, HeaderValue, Method}; // HTTP
 use axum::response::IntoResponse;       // convert to response
 use axum::routing::{post, delete};     // HTTP methods
 use axum::body::Body;                   // plain response body
@@ -22,7 +23,7 @@ use std::net::SocketAddr;               // socker definition
 use tower_http::cors::{CorsLayer, Any}; // CORS support
 
 // filesystem and os-related libraries
-use std::path::{Path, PathBuf};      // filesystem path operations
+use std::path::{Path, PathBuf, Component};      // filesystem path operations
 use std::fs::{read_dir, create_dir, remove_dir_all}; // filesystem utils
 
 // internal libraries
@@ -47,7 +48,34 @@ struct AppState {
 
 // common task definition
 
+fn validate_project_name(name: &str) -> Result<(), AppError> {
+    let name = name.trim();
 
+    if name.is_empty() {
+        return Err(AppError::BadRequest("project_name cannot be empty".into()));
+    }
+    if name.len() > 64 {
+        return Err(AppError::BadRequest("project_name too long".into()));
+    }
+
+    // 必須是「單一 segment」：不能包含 /，不能是 . 或 ..，不能是絕對路徑
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(_)), None) => {}
+        _ => return Err(AppError::BadRequest("invalid project_name path".into())),
+    }
+
+    // 字元白名單：中文(漢字)+英數+底線
+    // 若你也想允許 -，改成 [\\p{Han}A-Za-z0-9_-]+
+    let re = Regex::new(r"^[\p{Han}A-Za-z0-9_]+$").unwrap();
+    if !re.is_match(name) {
+        return Err(AppError::BadRequest(
+            "project_name only allows Chinese characters, letters, numbers, and '_'".into(),
+        ));
+    }
+
+    Ok(())
+}
 async fn save_image_to_project(
     project_root: &str,
     project_name: &str, 
@@ -212,6 +240,9 @@ async fn upload_handler(
     let project_root = state.project_root;
     let project_name = payload.project_name;
     let image_name = payload.image_name;
+    
+    // Validate project name to prevent path traversal attacks
+    validate_project_name(&project_name)?;
 
     // [NOTE] conside resize to save spaces.
     let image = base64_to_image(&payload.data)
@@ -245,6 +276,8 @@ async fn delete_project_handler(
     PathParam(project_name): PathParam<String>)
     -> Result<Json<DeleteProjectResp>, AppError> {
     
+    println!("[*] received delete project request for: <{}>", project_name);
+    validate_project_name(&project_name)?;
     let project_root = Path::new(&state.project_root);
     let project_path = project_root.join(&project_name);
     let project_dict = Arc::clone(&state.project_dict);
@@ -281,11 +314,16 @@ async fn delete_project_handler(
 
 /// Handler for "404 not found" error, returning plain text body.
 async fn not_found_handler() -> Response<Body> { 
-    (
-        StatusCode::NOT_FOUND,
-        [(http::header::CONTENT_TYPE, "application/json")],
-        "Knock, knock. Anyone here?\n\nSorry, this door seems to be missing! Maybe try another link?".to_owned()
-    ).into_response()
+    let mut response = Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(http::header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, DELETE, OPTIONS")
+        .header(http::header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+        .body(Body::from("Knock, knock. Anyone here?\n\nSorry, this door seems to be missing! Maybe try another link?".to_owned()))
+        .unwrap();
+    
+    response.into_response()
 }
 
 #[tokio::main]
@@ -373,16 +411,17 @@ async fn main() {
     // Configure CORS to allow requests from frontend
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers(Any)
+        .expose_headers(Any);
+    
     let axum_app: Router = Router::new()
                     .route("/diff", post(compare_handler))
                     .route("/upload", post(upload_handler))
-                    .route("/project/:project_name", delete(delete_project_handler))
-                    .layer(cors)
+                    .route("/project/{project_name}", delete(delete_project_handler))
+                    .fallback(not_found_handler)
                     .with_state(axum_state)
-                    .fallback(not_found_handler);
+                    .layer(cors);
 
     axum::serve(listener, axum_app).await.unwrap();
 }
