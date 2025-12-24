@@ -1,3 +1,29 @@
-/target
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Docker
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+.cursor/
+
+# Image storage (optional - you may want to track this)
 image_root/
+
+# OS
 .DS_Store
+Thumbs.db
