@@ -71,7 +71,29 @@ docker compose build
 docker compose up -d
 ```
 
-### Production
+### Firebase Hosting (Frontend)
+
+Deploy the frontend to Firebase Hosting. See [FIREBASE_DEPLOY.md](FIREBASE_DEPLOY.md) for complete instructions.
+
+**Quick start:**
+```bash
+# Install Firebase CLI
+npm install -g firebase-tools
+
+# Login and initialize
+firebase login
+firebase init hosting
+
+# Build and deploy
+cd frontend
+npm run build
+cd ..
+firebase deploy --only hosting
+```
+
+**Note:** The Rust backend cannot run on Firebase Functions. Deploy it separately to Cloud Run, Railway, Fly.io, or similar. See [FIREBASE_DEPLOY.md](FIREBASE_DEPLOY.md) for backend deployment options.
+
+### Production (Docker)
 
 1. Update `VITE_API_URL` in `compose.yml` to your API domain
 2. Rebuild: `docker compose build frontend`

@@ -11,6 +11,12 @@ frontend/.env.local
 # Docker
 .env
 
+# Firebase
+.firebaserc
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
 # IDE
 .vscode/
 .idea/
