@@ -3,7 +3,6 @@
 
 use async_trait::async_trait;
 use std::error::Error;
-use std::path::Path;
 use image::DynamicImage;
 use std::io::Cursor;
 
@@ -166,38 +165,63 @@ impl GcsStorage {
         format!("{}/{}", project_name, image_name)
     }
 
+    fn create_client() -> Result<reqwest::Client, Box<dyn Error + Send + Sync>> {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.into())
+    }
+
     async fn get_access_token(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Use Application Default Credentials (ADC)
-        // When running on Cloud Run, this is automatically available
-        // For local development, use: gcloud auth application-default login
+        // When running on Cloud Run, use metadata server
+        // For local development, try gcloud CLI first, then fall back to metadata server
         
-        use std::process::Command;
+        // First, try metadata server (works in Cloud Run and locally if configured)
+        let client = Self::create_client()?;
         
-        // Try to get token from gcloud CLI (for local dev)
-        let output = Command::new("gcloud")
-            .args(&["auth", "print-access-token"])
-            .output();
+        let token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
         
-        match output {
-            Ok(output) if output.status.success() => {
-                let token = String::from_utf8(output.stdout)?;
-                Ok(token.trim().to_string())
+        match client
+            .get(token_url)
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                let json: serde_json::Value = response.json().await?;
+                if let Some(token) = json["access_token"].as_str() {
+                    return Ok(token.to_string());
+                }
             }
             _ => {
-                // In Cloud Run, use metadata server
-                let client = reqwest::Client::new();
-                let token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+                // Metadata server not available, try gcloud CLI (local dev only)
+                let token = tokio::task::spawn_blocking(|| {
+                    use std::process::Command;
+                    Command::new("gcloud")
+                        .args(&["auth", "print-access-token"])
+                        .output()
+                        .ok()
+                        .and_then(|output| {
+                            if output.status.success() {
+                                String::from_utf8(output.stdout).ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|s| s.trim().to_string())
+                })
+                .await
+                .ok()
+                .flatten();
                 
-                let response = client
-                    .get(token_url)
-                    .header("Metadata-Flavor", "Google")
-                    .send()
-                    .await?;
-                
-                let json: serde_json::Value = response.json().await?;
-                Ok(json["access_token"].as_str().unwrap_or("").to_string())
+                if let Some(token) = token {
+                    return Ok(token);
+                }
             }
         }
+        
+        Err("Failed to get access token. Ensure you're running on Cloud Run or have gcloud CLI configured.".into())
     }
 }
 
@@ -226,7 +250,7 @@ impl StorageBackend for GcsStorage {
             urlencoding::encode(&object_name)
         );
 
-        let client = reqwest::Client::new();
+        let client = Self::create_client()?;
         let response = client
             .post(&upload_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -258,7 +282,7 @@ impl StorageBackend for GcsStorage {
             urlencoding::encode(&object_name)
         );
 
-        let client = reqwest::Client::new();
+        let client = Self::create_client()?;
         let response = client
             .get(&download_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -288,7 +312,7 @@ impl StorageBackend for GcsStorage {
             urlencoding::encode(&object_name)
         );
 
-        let client = reqwest::Client::new();
+        let client = Self::create_client()?;
         let response = client
             .delete(&delete_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -316,7 +340,7 @@ impl StorageBackend for GcsStorage {
             urlencoding::encode(&prefix)
         );
 
-        let client = reqwest::Client::new();
+        let client = Self::create_client()?;
         let response = client
             .get(&list_url)
             .header("Authorization", format!("Bearer {}", access_token))
@@ -363,7 +387,7 @@ impl StorageBackend for GcsStorage {
             urlencoding::encode(&prefix)
         );
 
-        let client = reqwest::Client::new();
+        let client = Self::create_client()?;
         let response = client
             .get(&list_url)
             .header("Authorization", format!("Bearer {}", access_token))

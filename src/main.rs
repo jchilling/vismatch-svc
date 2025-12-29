@@ -12,7 +12,7 @@ use tokio::sync::RwLock;    // shared object management
 use std::sync::Arc;         // shared object reference
 
 // HTTP related libs
-use axum::http::{Response, StatusCode, HeaderValue, Method}; // HTTP
+use axum::http::{Response, StatusCode, Method}; // HTTP
 use axum::response::IntoResponse;       // convert to response
 use axum::routing::{post, delete};     // HTTP methods
 use axum::body::Body;                   // plain response body
@@ -24,7 +24,7 @@ use tower_http::cors::{CorsLayer, Any}; // CORS support
 
 // filesystem and os-related libraries
 use std::path::{Path, PathBuf, Component};      // filesystem path operations
-use std::fs::{read_dir, create_dir, remove_dir_all}; // filesystem utils
+use std::fs::{read_dir, create_dir}; // filesystem utils
 
 // internal libraries
 use vismatch_svc::{
@@ -103,7 +103,7 @@ async fn save_image_to_project(
     let project_name_clone = project_name.to_string();
     let image_name_clone = image_name.to_string();
     let hash_calc_task = 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<ImageHashEntry, Box<dyn Error + Send + Sync>> {
             use vismatch_svc::image_hash::{mk_hasher, Hash};
             use std::path::PathBuf;
             
@@ -307,7 +307,7 @@ async fn delete_project_handler(
 
 /// Handler for "404 not found" error, returning plain text body.
 async fn not_found_handler() -> Response<Body> { 
-    let mut response = Response::builder()
+    let response = Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -324,7 +324,12 @@ async fn main() {
 
     // Stage 1: Initialize storage backend
     let storage = Arc::from(create_storage_backend()
-        .map_err(|e| format!("Failed to initialize storage: {}", e))?);
+        .map_err(|e| format!("Failed to initialize storage: {}", e))
+        .unwrap_or_else(|e| {
+            eprintln!("[x] Failed to initialize storage: {}", e);
+            eprintln!("[x] Shutting down.");
+            std::process::exit(1);
+        }));
 
     // Stage 2: Load projects from storage (if using local storage, load from filesystem)
     let standard_hash_type: HashType = HashType::PHASH;
