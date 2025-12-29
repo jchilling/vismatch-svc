@@ -3,6 +3,7 @@ pub mod vec_ops;
 pub mod metric;
 pub mod image_hash;
 pub mod project_mgmt;
+pub mod storage;
 mod utils;
 
 pub use utils::is_image_file;
@@ -75,6 +76,7 @@ impl HasSingleImage for CompareImageReq {
 }
 
 /// Convert a`ImageDistEntry` to `SimilarImageEntry`.
+/// For local filesystem storage (legacy compatibility)
 pub fn dist_entry_to_api_sim_entry(dist: &ImageDistEntry, with_image: bool)
     -> SimilarImageEntry {
 
@@ -91,6 +93,40 @@ pub fn dist_entry_to_api_sim_entry(dist: &ImageDistEntry, with_image: bool)
     let image_full_name = dist.image_name.clone();
 
     let image_name = match image_full_name.file_name() {
+        None => "".to_owned(),
+        Some(f) => f.to_string_lossy().into_owned(),
+    };
+
+    SimilarImageEntry { 
+        image_name, 
+        distance: dist.distance as f32, 
+        data: image_data }
+}
+
+/// Convert ImageDistEntry to SimilarImageEntry using storage backend
+pub async fn dist_entry_to_api_sim_entry_with_storage(
+    dist: &ImageDistEntry,
+    with_image: bool,
+    storage: &dyn crate::storage::StorageBackend,
+    project_name: &str,
+) -> SimilarImageEntry {
+    let image_data = match with_image {
+        false => None,
+        true => {
+            // Extract image name from path
+            let image_name = dist.image_name.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            // Try to load from storage
+            storage.load_image(project_name, image_name)
+                .await
+                .ok()
+                .and_then(|img| image_to_base64(&img).ok())
+        },
+    };
+
+    let image_name = match dist.image_name.file_name() {
         None => "".to_owned(),
         Some(f) => f.to_string_lossy().into_owned(),
     };

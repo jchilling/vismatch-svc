@@ -64,11 +64,26 @@ See [frontend/USAGE.md](frontend/USAGE.md) for detailed usage instructions.
 
 ## Deployment
 
+### Storage Backend
+
+The backend supports two storage options:
+- **Local Storage** (default): Files stored in `./image_root/` - Good for development
+- **Firebase Storage (GCS)**: Files stored in Google Cloud Storage - Required for Cloud Run
+
+See [STORAGE_SETUP.md](STORAGE_SETUP.md) for Firebase Storage configuration.
+
 ### Docker Compose
 
 ```bash
 docker compose build
 docker compose up -d
+```
+
+**To use Firebase Storage with Docker:**
+```yaml
+# In compose.yml, add:
+environment:
+  - GCS_BUCKET_NAME=your-bucket-name
 ```
 
 ### Firebase Hosting (Frontend)

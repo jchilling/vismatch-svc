@@ -30,19 +30,20 @@ use std::fs::{read_dir, create_dir, remove_dir_all}; // filesystem utils
 use vismatch_svc::{
     HasSingleImage,         // trait for getting image from request object
     base64_to_image, 
-    dist_entry_to_api_sim_entry, image_hash::*};     // our packaged hash algorithms
+    dist_entry_to_api_sim_entry_with_storage, image_hash::*};     // our packaged hash algorithms
 
 use vismatch_svc::project_mgmt::{
     load_or_calc_project_hashes     
 };
 use vismatch_svc::api::*;           // API structure
+use vismatch_svc::storage::{StorageBackend, create_storage_backend};
 
 
 type ProjectHashDict = Arc<RwLock<HashMap<String, Vec<ImageHashEntry>>>>;
 
 #[derive(Clone)]
 struct AppState {
-    project_root: String,
+    storage: Arc<dyn StorageBackend>,
     project_dict: ProjectHashDict,
 }
 
@@ -77,71 +78,53 @@ fn validate_project_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 async fn save_image_to_project(
-    project_root: &str,
+    storage: Arc<dyn StorageBackend>,
     project_name: &str, 
     image: &DynamicImage, 
     image_name: &str,
     hash_type: HashType,
     project_hashes: ProjectHashDict) -> Result<(), Box<dyn Error + Send + Sync>> {
 
-    let project_root = Path::new(project_root);
-    let project_path = &project_root.join(project_name);
-
     let _project_hashes = Arc::clone(&project_hashes);
     let mut project_dict_wlock = _project_hashes.write().await;
 
-    // check project dir
-    match project_path.is_dir() {
-        false => {
-            // create project folder
-            create_dir(project_path)
-                .map_err(|e| format!("cannot create project folder: {}", e.to_string()))?;
-
-            // create entry for our new project.
-            (*project_dict_wlock).insert(project_name.to_owned(), Vec::<ImageHashEntry>::new());
-        }
-        true => {} // continue execution
+    // Check if project exists in dict, if not create entry
+    if !(*project_dict_wlock).contains_key(project_name) {
+        (*project_dict_wlock).insert(project_name.to_owned(), Vec::<ImageHashEntry>::new());
     }
 
-    // now add image name
-    let image_target_path = project_path.join(image_name);
+    // Save the image using storage backend
+    println!("[*] saving image to storage: {}/{}", project_name, image_name);
+    let _storage_path = storage.save_image(project_name, image_name, image).await?;
+    println!("[*] image saved to: {}", _storage_path);
 
-    // [NOTE] verbose print
-    println!("[*] saving image to <{}>", image_target_path.to_string_lossy());
-
-    // save the image
-    image.save(&image_target_path)
-        .map_err(|e: image::ImageError| 
-            Box::<dyn std::error::Error + Send + Sync>::from(   // I know it's tricky, but we need to cast the error
-                format!("error while saving image: {}", e.to_string())))?;
-
-    // now we need to calculate, and update the global hash dict.
-    // we clone this, since it will be moved to other thread
-    let _image_target_path = image_target_path.clone();
-
-    // we spawn a task to calculate hash.
+    // Calculate hash directly from the image (we already have it in memory)
+    let image_clone = image.clone();
+    let project_name_clone = project_name.to_string();
+    let image_name_clone = image_name.to_string();
     let hash_calc_task = 
-        tokio::task::spawn_blocking(move || {    
-            let image_target_path = _image_target_path;
-
-            // we need type annotation, so we created a new varibale here to hold result.
-            let res: Result<ImageHashEntry, Box<dyn Error + Send + Sync>> = 
-                fetch_cache_or_calc_hash(
-                    &image_target_path, 
-                    hash_type,
-                    true)
-                    .map_err(|f|f.to_string().into());  
-            res // return the result
+        tokio::task::spawn_blocking(move || {
+            use vismatch_svc::image_hash::{mk_hasher, Hash};
+            use std::path::PathBuf;
+            
+            let hasher = mk_hasher(hash_type);
+            let hash: Hash = hasher.hash(&image_clone).into();
+            
+            // Create a virtual path for the hash entry (for compatibility)
+            let virtual_path = PathBuf::from(&project_name_clone).join(&image_name_clone);
+            
+            Ok(ImageHashEntry {
+                image_name: virtual_path,
+                hash_type,
+                hash,
+            })
         });
 
-    let hash_result: ImageHashEntry = hash_calc_task.await??; // now we have the calculated hash.
+    let hash_result: ImageHashEntry = hash_calc_task.await??;
 
-    // now we can update the project hash dict.
-    let project_name = project_name;
-
-    if let Some(val) = 
-        (*project_dict_wlock).get_mut(project_name) { 
-            val.push(hash_result); 
+    // Update the project hash dict
+    if let Some(val) = (*project_dict_wlock).get_mut(project_name) { 
+        val.push(hash_result); 
     }
 
     Ok(()) // All good, return
@@ -213,12 +196,19 @@ async fn compare_handler(
 
             // [NOTE] we pick the top-3 entries from closest images, change if needed.
             let ending_index = min(dist_vec.len(), 3);
-            let sim_vec: Vec<SimilarImageEntry> = (&dist_vec[0..ending_index])
-                .iter().map(
-                    |x| dist_entry_to_api_sim_entry(
-                        x, 
-                        payload.with_image))
-                .collect();
+            let storage = Arc::clone(&state.storage);
+            let project_name = payload.project_name.clone();
+            
+            let mut sim_vec = Vec::new();
+            for entry in &dist_vec[0..ending_index] {
+                let sim_entry = dist_entry_to_api_sim_entry_with_storage(
+                    entry,
+                    payload.with_image,
+                    storage.as_ref(),
+                    &project_name,
+                ).await;
+                sim_vec.push(sim_entry);
+            }
             
             Ok(Json(CompareImageResp {
             success: true,
@@ -237,7 +227,6 @@ async fn upload_handler(
     
     // 1. we first collect parameters we need
 
-    let project_root = state.project_root;
     let project_name = payload.project_name;
     let image_name = payload.image_name;
     
@@ -249,13 +238,13 @@ async fn upload_handler(
                 .map_err(|e| format!("cannot create image from b64: {}", e.to_string()))
                 .map_err(|e| AppError::BadRequest(e.to_string()))?;
     let project_dict = Arc::clone(&state.project_dict);
-    
+    let storage = Arc::clone(&state.storage);
 
     println!("[*] received upload request on <{}>", project_name); // [NOTE] verbose
 
     // do saving image, return 500 if failed
     save_image_to_project(
-        &project_root,
+        storage,
         &project_name,
         &image,
         &image_name,
@@ -274,42 +263,46 @@ async fn upload_handler(
 async fn delete_project_handler(
     State(state): State<AppState>,
     PathParam(project_name): PathParam<String>)
-    -> Result<Json<DeleteProjectResp>, AppError> {
-    
-    println!("[*] received delete project request for: <{}>", project_name);
-    validate_project_name(&project_name)?;
-    let project_root = Path::new(&state.project_root);
-    let project_path = project_root.join(&project_name);
-    let project_dict = Arc::clone(&state.project_dict);
+        -> Result<Json<DeleteProjectResp>, AppError> {
+        
+        println!("[*] received delete project request for: <{}>", project_name);
+        validate_project_name(&project_name)?;
+        let project_dict = Arc::clone(&state.project_dict);
+        let storage = Arc::clone(&state.storage);
 
-    // Check if project exists
-    if !project_path.exists() {
-        return Ok(Json(DeleteProjectResp {
-            success: false,
-            message: format!("Project '{}' does not exist", project_name),
-        }));
-    }
+        // Check if project exists in dict
+        let project_exists = {
+            let project_dict_rlock = project_dict.read().await;
+            project_dict_rlock.contains_key(&project_name)
+        };
 
-    // Remove from in-memory hash dict first
-    {
-        let mut project_dict_wlock = project_dict.write().await;
-        project_dict_wlock.remove(&project_name);
-    }
+        if !project_exists {
+            return Ok(Json(DeleteProjectResp {
+                success: false,
+                message: format!("Project '{}' does not exist", project_name),
+            }));
+        }
 
-    // Delete the project directory
-    match remove_dir_all(&project_path) {
-        Ok(_) => {
-            println!("[*] deleted project <{}>", project_name);
-            Ok(Json(DeleteProjectResp {
-                success: true,
-                message: format!("Project '{}' deleted successfully", project_name),
-            }))
-        },
-        Err(e) => {
-            Err(AppError::InternalError(format!("Failed to delete project directory: {}", e)))
+        // Remove from in-memory hash dict first
+        {
+            let mut project_dict_wlock = project_dict.write().await;
+            project_dict_wlock.remove(&project_name);
+        }
+
+        // Delete the project from storage
+        match storage.delete_project(&project_name).await {
+            Ok(_) => {
+                println!("[*] deleted project <{}>", project_name);
+                Ok(Json(DeleteProjectResp {
+                    success: true,
+                    message: format!("Project '{}' deleted successfully", project_name),
+                }))
+            },
+            Err(e) => {
+                Err(AppError::InternalError(format!("Failed to delete project: {}", e)))
+            }
         }
     }
-}
 
 
 /// Handler for "404 not found" error, returning plain text body.
@@ -329,64 +322,68 @@ async fn not_found_handler() -> Response<Body> {
 #[tokio::main]
 async fn main() {
 
-    // Stage 1: check prerequisites
+    // Stage 1: Initialize storage backend
+    let storage = Arc::from(create_storage_backend()
+        .map_err(|e| format!("Failed to initialize storage: {}", e))?);
 
+    // Stage 2: Load projects from storage (if using local storage, load from filesystem)
     let standard_hash_type: HashType = HashType::PHASH;
+    let load_all = Instant::now();
 
-    let load_all = Instant::now(); // Measure load time
+    // For now, only load projects if using local storage
+    // With GCS, we'll load projects on-demand or from a metadata store
+    let project_name_hash_map: ProjectHashDict = if std::env::var("GCS_BUCKET_NAME").is_err() {
+        // Local storage: load from filesystem
+        let project_root: &Path = Path::new("./image_root");
 
-    let project_root: &Path = Path::new("./image_root");
+        let is_project_root_exists = 
+            project_root.try_exists()
+                    .expect("[x] can't check existence of project root folder, shutting down.");
 
-    let is_project_root_exists = 
-        project_root.try_exists()
-                .expect("[x] can't check existence of project root folder, shutting down.");
-
-    match is_project_root_exists {
-        false => {
-            match create_dir(project_root) {
-                Ok(_) => println!("[*] created project root folder."),
-                Err(_) => panic!("[x] cannot create project folder, shutting down."),
-            }
-        },
-        true => {
-            match project_root.is_dir() {
-                false => panic!("[x] project folder is not valid, shutting down."),
-                true => {}, // Do nothing, continue the service process
+        match is_project_root_exists {
+            false => {
+                match create_dir(project_root) {
+                    Ok(_) => println!("[*] created project root folder."),
+                    Err(_) => panic!("[x] cannot create project folder, shutting down."),
+                }
+            },
+            true => {
+                match project_root.is_dir() {
+                    false => panic!("[x] project folder is not valid, shutting down."),
+                    true => {}, // Do nothing, continue the service process
+                }
             }
         }
-    }
 
-    // Stage 2: load or calculate hash for children projects
+        let child_project_reader = 
+            read_dir(project_root)
+                .map_err(|e: std::io::Error| format!("error reading root project contents: <{}>", e))
+                .unwrap();
 
-    let child_project_reader = 
-        read_dir(project_root)
-            .map_err(|e: std::io::Error| format!("error reading root project contents: <{}>", e))
-            .unwrap(); // [Panics] Terminates process if cannot access project root.
+        let (children_projects, _): (Vec<_>, Vec<_>) = 
+            child_project_reader.filter_ok(|f| f.path().is_dir())
+                    .map_ok(|f| f.path())
+                    .partition_result();
 
-    let (children_projects, _): (Vec<_>, Vec<_>) = 
-        child_project_reader.filter_ok(|f| f.path().is_dir())
-                .map_ok(|f| f.path())
-                .partition_result();
+        let (children_project_hashes, _): 
+            (Vec<(String, Vec<ImageHashEntry>)>, Vec<_>) = 
+                children_projects.into_iter()
+                    .map(|f: PathBuf| {
+                        match load_or_calc_project_hashes(&f, standard_hash_type) {
+                            Ok(h) => {
+                                let project_name = 
+                                    f.file_name().ok_or("invalid project name")?;
+                                Ok((project_name.to_string_lossy().into_owned(), h))
+                            },
+                            Err(err) => Err(err),
+                        }})
+                    .partition_result();
 
-
-    // Load and create a list of tuple (project name, [hash entries])
-    let (children_project_hashes, _): 
-        (Vec<(String, Vec<ImageHashEntry>)>, Vec<_>) = 
-            children_projects.into_iter()
-                .map(|f: PathBuf| {
-                    match load_or_calc_project_hashes(&f, standard_hash_type) {
-                        Ok(h) => {
-                            let project_name = 
-                                f.file_name().ok_or("invalid project name")?;
-                            Ok((project_name.to_string_lossy().into_owned(), h))
-                        },
-                        Err(err) => Err(err),
-                    }})
-                .partition_result();
-
-    // Create a Arc to wrap shared project hashes.
-    let project_name_hash_map: ProjectHashDict
-            = Arc::new(RwLock::new(children_project_hashes.into_iter().collect()));
+        Arc::new(RwLock::new(children_project_hashes.into_iter().collect()))
+    } else {
+        // GCS storage: start with empty dict, load on-demand
+        Arc::new(RwLock::new(HashMap::new()))
+    };
 
     let load_all_done = load_all.elapsed(); // Measure load time
 
@@ -405,7 +402,7 @@ async fn main() {
 
     // Stage 3: starting service
     let axum_state: AppState = AppState { 
-        project_root: project_root.to_string_lossy().to_string(),
+        storage,
         project_dict: project_name_hash_map };
 
     // Configure CORS to allow requests from frontend

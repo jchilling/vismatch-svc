@@ -192,9 +192,18 @@ VITE_API_URL=https://your-backend-url.com
 ### Backend (Cloud Run / Railway / etc.)
 
 Set these environment variables in your deployment platform:
-- No required env vars currently, but you may want to add:
-  - `RUST_LOG=info` (for logging)
-  - `PORT=3000` (if your platform requires it)
+
+**Required for Cloud Run (Firebase Storage):**
+- `GCS_BUCKET_NAME=your-bucket-name` - Your GCS bucket name
+
+**Optional:**
+- `RUST_LOG=info` (for logging)
+- `PORT=3000` (if your platform requires it)
+
+**For local filesystem storage (development only):**
+- `PROJECT_ROOT=./image_root` (default, can be omitted)
+
+See [STORAGE_SETUP.md](STORAGE_SETUP.md) for detailed storage setup instructions.
 
 ## Continuous Deployment
 
