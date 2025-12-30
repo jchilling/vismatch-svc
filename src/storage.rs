@@ -5,6 +5,9 @@ use async_trait::async_trait;
 use std::error::Error;
 use image::DynamicImage;
 use std::io::Cursor;
+use std::collections::HashMap;
+
+use crate::image_hash::{ImageHashEntry, HashType, mk_hasher, Hash};
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
@@ -225,6 +228,121 @@ impl GcsStorage {
     }
 }
 
+impl GcsStorage {
+    /// Load all projects and their hash entries from GCS.
+    /// This scans the whole bucket, groups objects by project (first path segment),
+    /// downloads each image, and builds ImageHashEntry lists.
+    pub async fn load_all_project_hashes(
+        &self,
+        hash_type: HashType,
+    ) -> Result<Vec<(String, Vec<ImageHashEntry>)>, Box<dyn Error + Send + Sync>> {
+        // 1. List all objects in the bucket (paginate if necessary)
+        let mut project_files: HashMap<String, Vec<String>> = HashMap::new();
+        let access_token = self.get_access_token().await?;
+
+        let mut page_token: Option<String> = None;
+
+        loop {
+            let mut list_url = format!(
+                "https://storage.googleapis.com/storage/v1/b/{}/o",
+                self.bucket_name
+            );
+            if let Some(token) = &page_token {
+                list_url.push_str(&format!("?pageToken={}", urlencoding::encode(token)));
+            }
+
+            let client = Self::create_client()?;
+            let response = client
+                .get(&list_url)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(format!("GCS list failed: {}", response.status()).into());
+            }
+
+            let json: serde_json::Value = response.json().await?;
+
+            if let Some(items) = json["items"].as_array() {
+                for item in items {
+                    if let Some(name) = item["name"].as_str() {
+                        // Name pattern: "<project_name>/<image_name>"
+                        if let Some((project, _rest)) = name.split_once('/') {
+                            project_files
+                                .entry(project.to_string())
+                                .or_default()
+                                .push(name.to_string());
+                        }
+                    }
+                }
+            }
+
+            if let Some(token) = json["nextPageToken"].as_str() {
+                page_token = Some(token.to_string());
+            } else {
+                break;
+            }
+        }
+
+        // 2. For each project, download images and build hash entries
+        let mut result: Vec<(String, Vec<ImageHashEntry>)> = Vec::new();
+
+        for (project_name, object_names) in project_files.into_iter() {
+            let mut entries: Vec<ImageHashEntry> = Vec::new();
+            let client = Self::create_client()?;
+
+            for object_name in object_names {
+                // Extract image_name (after "<project_name>/")
+                let image_name = match object_name.split_once('/') {
+                    Some((_proj, img)) => img.to_string(),
+                    None => continue,
+                };
+
+                // Download image
+                let download_url = format!(
+                    "https://storage.googleapis.com/{}/{}",
+                    self.bucket_name,
+                    urlencoding::encode(&object_name)
+                );
+
+                let resp = client
+                    .get(&download_url)
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .send()
+                    .await?;
+
+                if !resp.status().is_success() {
+                    // Skip this file but continue others
+                    continue;
+                }
+
+                let bytes = resp.bytes().await?;
+                let img = image::load_from_memory(&bytes)?;
+
+                // Calculate hash
+                let hasher = mk_hasher(hash_type);
+                let hash: Hash = hasher.hash(&img).into();
+
+                // Use a virtual path "project/image_name" to keep compatibility
+                let virtual_path = std::path::PathBuf::from(&project_name).join(&image_name);
+
+                entries.push(ImageHashEntry {
+                    image_name: virtual_path,
+                    hash_type,
+                    hash,
+                });
+            }
+
+            if !entries.is_empty() {
+                result.push((project_name, entries));
+            }
+        }
+
+        Ok(result)
+    }
+}
+
 #[async_trait]
 impl StorageBackend for GcsStorage {
     async fn save_image(
@@ -414,6 +532,15 @@ impl StorageBackend for GcsStorage {
 
         Ok(images)
     }
+}
+
+/// Convenience helper: load all project hashes using GCS_BUCKET_NAME from env.
+pub async fn load_all_project_hashes_from_gcs_env(
+    hash_type: HashType,
+) -> Result<Vec<(String, Vec<ImageHashEntry>)>, Box<dyn Error + Send + Sync>> {
+    let bucket = std::env::var("GCS_BUCKET_NAME")?;
+    let storage = GcsStorage::new(bucket);
+    storage.load_all_project_hashes(hash_type).await
 }
 
 /// Create storage backend based on environment variables

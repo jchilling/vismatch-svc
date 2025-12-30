@@ -12,11 +12,11 @@ import type {
 // Support both build-time and runtime configuration
 // For Docker deployments, use window.ENV_API_URL if available
 const getApiBaseUrl = (): string => {
-  // Runtime configuration (for Docker)
+  // Runtime configuration (for Docker) - only use if explicitly set
   if (typeof window !== 'undefined' && (window as any).ENV_API_URL) {
     return (window as any).ENV_API_URL;
   }
-  // Build-time configuration (for Vite)
+  // Build-time configuration (for Vite/Firebase)
   return import.meta.env.VITE_API_URL || 'http://localhost:3000';
 };
 
