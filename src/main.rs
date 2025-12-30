@@ -12,11 +12,12 @@ use tokio::sync::RwLock;    // shared object management
 use std::sync::Arc;         // shared object reference
 
 // HTTP related libs
-use axum::http::{Response, StatusCode, Method}; // HTTP
+use axum::http::{Response, StatusCode, Method, HeaderMap}; // HTTP
 use axum::response::IntoResponse;       // convert to response
 use axum::routing::{post, delete};     // HTTP methods
 use axum::body::Body;                   // plain response body
-use axum::extract::{Json, State, Path as PathParam}; // response types
+use axum::extract::{Json, State, Path as PathParam, Request}; // response types
+use axum::middleware::Next;
 use axum::{Router, http};               // router
 use tokio::net::TcpListener;            // listener
 use std::net::SocketAddr;               // socker definition
@@ -38,6 +39,7 @@ use vismatch_svc::project_mgmt::{
 };
 use vismatch_svc::api::*;           // API structure
 use vismatch_svc::storage::{StorageBackend, create_storage_backend, load_all_project_hashes_from_gcs_env};
+use vismatch_svc::auth::{verify_iap_auth, IapUser};
 
 
 type ProjectHashDict = Arc<RwLock<HashMap<String, Vec<ImageHashEntry>>>>;
@@ -176,9 +178,14 @@ async fn calc_sim_in_project(image: DynamicImage, project_name: &str, project_ha
 // here's are the service handlers
 
 async fn compare_handler(
-    State(state): State<AppState>, 
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CompareImageReq>)
     -> Result<Json<CompareImageResp>, AppError> {
+    
+    // Verify IAP authentication
+    let _iap_user = verify_iap_auth(&headers).await
+        .map_err(|_| AppError::Unauthorized("IAP authentication required".into()))?;
     
     // 1. we first get the image from data b64 string
     let image_target 
@@ -222,9 +229,14 @@ async fn compare_handler(
 }
 
 async fn upload_handler(
-    State(state): State<AppState>, 
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<UploadImageReq>)
     -> Result<Json<UploadImageResp>, AppError> {
+    
+    // Verify IAP authentication
+    let _iap_user = verify_iap_auth(&headers).await
+        .map_err(|_| AppError::Unauthorized("IAP authentication required".into()))?;
     
     // 1. we first collect parameters we need
 
@@ -280,8 +292,13 @@ async fn upload_handler(
 
 async fn delete_project_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     PathParam(project_name): PathParam<String>)
-        -> Result<Json<DeleteProjectResp>, AppError> {
+    -> Result<Json<DeleteProjectResp>, AppError> {
+    
+    // Verify IAP authentication
+    let _iap_user = verify_iap_auth(&headers).await
+        .map_err(|_| AppError::Unauthorized("IAP authentication required".into()))?;
         
         println!("[*] received delete project request for: <{}>", project_name);
         validate_project_name(&project_name)?;
@@ -449,9 +466,12 @@ async fn main() {
 
     // Stage 3: starting service
     eprintln!("[*] Stage 3: Setting up Axum router...");
+    eprintln!("[*] IAP authentication: ENABLED (expecting X-Goog-Authenticated-User-* headers)");
+    
     let axum_state: AppState = AppState { 
         storage: Arc::clone(&storage),
-        project_dict: Arc::clone(&project_name_hash_map) };
+        project_dict: Arc::clone(&project_name_hash_map),
+    };
 
     // Configure CORS to allow requests from frontend
     let cors = CorsLayer::new()

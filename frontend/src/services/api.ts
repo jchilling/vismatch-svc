@@ -29,6 +29,9 @@ const apiClient = axios.create({
   },
 });
 
+// Note: IAP automatically adds X-Goog-Authenticated-User-* headers
+// No need to manually add authentication headers
+
 // Helper to convert File to base64
 export const fileToBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {

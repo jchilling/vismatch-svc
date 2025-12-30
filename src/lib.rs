@@ -4,6 +4,7 @@ pub mod metric;
 pub mod image_hash;
 pub mod project_mgmt;
 pub mod storage;
+pub mod auth;
 mod utils;
 
 pub use utils::is_image_file;

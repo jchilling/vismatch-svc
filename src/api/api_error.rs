@@ -8,6 +8,7 @@ pub enum AppError {
     InternalError(String),
     Teapot(String),
     BadRequest(String),
+    Unauthorized(String),
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -49,6 +50,17 @@ impl IntoResponse for AppError {
 
                 (   
                     http::StatusCode::BAD_REQUEST, 
+                    [(http::header::CONTENT_TYPE, "application/json")],
+                    body.to_string()
+                ).into_response()
+            },
+            AppError::Unauthorized(msg) => {
+                let body = json!( AppErrorPayload{
+                    message: msg,
+                });
+
+                (   
+                    http::StatusCode::UNAUTHORIZED, 
                     [(http::header::CONTENT_TYPE, "application/json")],
                     body.to_string()
                 ).into_response()
