@@ -25,6 +25,7 @@ use tower_http::cors::{CorsLayer, Any}; // CORS support
 // filesystem and os-related libraries
 use std::path::{Path, PathBuf, Component};      // filesystem path operations
 use std::fs::{read_dir, create_dir}; // filesystem utils
+use std::io::Write; // file writing
 
 // internal libraries
 use vismatch_svc::{
@@ -338,45 +339,29 @@ async fn not_found_handler() -> Response<Body> {
 
 #[tokio::main]
 async fn main() {
-    // #region agent log
-    use std::io::Write;
-    let log_path = "/Users/chy/Desktop/vismatch-svc/.cursor/debug.log";
-    let mut log_file = std::fs::OpenOptions::new().create(true).append(true).open(log_path).ok();
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:340\",\"message\":\"main() entry\",\"data\":{{\"timestamp\":{}}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
+    eprintln!("[*] Starting vismatch-svc...");
+    eprintln!("[*] Environment check:");
+    eprintln!("  - GCS_BUCKET_NAME: {:?}", std::env::var("GCS_BUCKET_NAME").ok());
+    eprintln!("  - PORT: {:?}", std::env::var("PORT").ok());
 
     // Stage 1: Initialize storage backend
+    eprintln!("[*] Stage 1: Initializing storage backend...");
     let storage = Arc::from(create_storage_backend()
         .map_err(|e| format!("Failed to initialize storage: {}", e))
         .unwrap_or_else(|e| {
-            // #region agent log
-            let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"E\",\"location\":\"main.rs:346\",\"message\":\"storage init failed\",\"data\":{{\"error\":\"{}\"}},\"timestamp\":{}}}", e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-            // #endregion
             eprintln!("[x] Failed to initialize storage: {}", e);
             eprintln!("[x] Shutting down.");
             std::process::exit(1);
         }));
 
-    // #region agent log
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:350\",\"message\":\"storage init success\",\"data\":{{}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
-
     // Stage 2: Load projects from storage (GCS or local filesystem)
+    eprintln!("[*] Stage 2: Loading projects from storage...");
     let standard_hash_type: HashType = HashType::PHASH;
     let load_all = Instant::now();
-
-    // #region agent log
-    let gcs_bucket = std::env::var("GCS_BUCKET_NAME").ok();
-    let port_env = std::env::var("PORT").ok();
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"B\",\"location\":\"main.rs:355\",\"message\":\"env vars check\",\"data\":{{\"GCS_BUCKET_NAME\":{:?},\"PORT\":{:?}}},\"timestamp\":{}}}", gcs_bucket, port_env, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
 
     let (project_name_hash_map, needs_background_indexing): (ProjectHashDict, bool) = if std::env::var("GCS_BUCKET_NAME").is_ok() {
         // GCS storage: start with empty index, rebuild in background to avoid startup timeout
         println!("[*] Detected GCS_BUCKET_NAME, starting with empty index (will rebuild in background)...");
-        // #region agent log
-        let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"C\",\"location\":\"main.rs:375\",\"message\":\"GCS: starting with empty index\",\"data\":{{}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-        // #endregion
         (Arc::new(RwLock::new(HashMap::new())), true)
     } else {
         // Local storage: load from filesystem
@@ -433,41 +418,37 @@ async fn main() {
     // [NOTE] any other init stage thingy goes here.
 
     println!("[*] initialization stage costs: {:.3?}", load_all_done);
-    println!("[v] initialization stage done, strating service...");
-
-    // #region agent log
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:416\",\"message\":\"indexing complete\",\"data\":{{\"duration_sec\":{}}},\"timestamp\":{}}}", load_all_done.as_secs_f64(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
+    println!("[v] initialization stage done, starting service...");
 
     // Read port from PORT env var (Cloud Run sets this), default to 3000
-    let port: u16 = std::env::var("PORT")
-        .ok()
+    let port_env = std::env::var("PORT").ok();
+    let port: u16 = port_env
+        .as_ref()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
     
-    // #region agent log
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"B\",\"location\":\"main.rs:423\",\"message\":\"port configuration\",\"data\":{{\"port\":{},\"port_from_env\":{}}},\"timestamp\":{}}}", port, std::env::var("PORT").is_ok(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
+    eprintln!("[*] PORT env var: {:?}, using port: {}", port_env, port);
 
     let addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], port));
+    eprintln!("[*] Attempting to bind to address: {}", addr);
 
-    // #region agent log
-    let bind_start = Instant::now();
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:425\",\"message\":\"binding listener\",\"data\":{{\"addr\":\"{}\"}},\"timestamp\":{}}}", addr, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
-
-    let listener: TcpListener = 
-        TcpListener::bind(addr).await.unwrap();
-
-    // #region agent log
-    let bind_duration = bind_start.elapsed();
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:428\",\"message\":\"listener bound successfully\",\"data\":{{\"duration_sec\":{}}},\"timestamp\":{}}}", bind_duration.as_secs_f64(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => {
+            eprintln!("[*] Successfully bound to {}", addr);
+            l
+        },
+        Err(e) => {
+            eprintln!("[x] Failed to bind to {}: {}", addr, e);
+            eprintln!("[x] Shutting down.");
+            std::process::exit(1);
+        }
+    };
 
     println!("[*] image comparison service listening on {}", addr);
 
 
     // Stage 3: starting service
+    eprintln!("[*] Stage 3: Setting up Axum router...");
     let axum_state: AppState = AppState { 
         storage: Arc::clone(&storage),
         project_dict: Arc::clone(&project_name_hash_map) };
@@ -497,7 +478,9 @@ async fn main() {
             let bg_log_path = "/Users/chy/Desktop/vismatch-svc/.cursor/debug.log";
             let mut bg_log_file = std::fs::OpenOptions::new().create(true).append(true).open(bg_log_path).ok();
             let bg_start = Instant::now();
-            let _ = writeln!(bg_log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"C\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing start\",\"data\":{{}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+            if let Some(ref mut file) = bg_log_file {
+                let _ = writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"C\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing start\",\"data\":{{}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+            }
             // #endregion
             match load_all_project_hashes_from_gcs_env(standard_hash_type).await {
                 Ok(children_project_hashes) => {
@@ -505,13 +488,17 @@ async fn main() {
                     *dict = children_project_hashes.into_iter().collect();
                     let bg_duration = bg_start.elapsed();
                     // #region agent log
-                    let _ = writeln!(bg_log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"C\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing complete\",\"data\":{{\"duration_sec\":{},\"project_count\":{}}},\"timestamp\":{}}}", bg_duration.as_secs_f64(), dict.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    if let Some(ref mut file) = bg_log_file {
+                        let _ = writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"C\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing complete\",\"data\":{{\"duration_sec\":{},\"project_count\":{}}},\"timestamp\":{}}}", bg_duration.as_secs_f64(), dict.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
                     // #endregion
                     println!("[*] Background GCS index rebuild complete in {:.3?}", bg_duration);
                 },
                 Err(e) => {
                     // #region agent log
-                    let _ = writeln!(bg_log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"D\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing error\",\"data\":{{\"error\":\"{}\"}},\"timestamp\":{}}}", e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    if let Some(ref mut file) = bg_log_file {
+                        let _ = writeln!(file, "{{\"sessionId\":\"debug-session\",\"runId\":\"background\",\"hypothesisId\":\"D\",\"location\":\"main.rs:bg\",\"message\":\"background GCS indexing error\",\"data\":{{\"error\":\"{}\"}},\"timestamp\":{}}}", e, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    }
                     // #endregion
                     eprintln!("[x] Background GCS index rebuild failed: {}", e);
                 }
@@ -519,11 +506,16 @@ async fn main() {
         });
     }
 
-    // #region agent log
-    let _ = writeln!(log_file.as_mut().unwrap(), "{{\"sessionId\":\"debug-session\",\"runId\":\"startup\",\"hypothesisId\":\"A\",\"location\":\"main.rs:451\",\"message\":\"starting axum server\",\"data\":{{}},\"timestamp\":{}}}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
-    // #endregion
-
-    axum::serve(listener, axum_app).await.unwrap();
+    eprintln!("[*] Starting Axum server...");
+    match axum::serve(listener, axum_app).await {
+        Ok(_) => {
+            eprintln!("[*] Server stopped normally");
+        },
+        Err(e) => {
+            eprintln!("[x] Server error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 
